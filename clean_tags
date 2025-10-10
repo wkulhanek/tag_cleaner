@@ -1,0 +1,3 @@
+#!/bin/bash
+source ~/Development/virtualenvs/tag_cleaner/bin/activate
+~/Development/tag_cleaner/clean_music_tags.py "${1}"
