@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import mutagen
-from mutagen.id3 import ID3, APIC, TPE1, TPE2, TIT2, TALB, TDRC, TCON, TRCK, TPOS
+from mutagen.id3 import ID3, APIC, TPE1, TPE2, TIT2, TALB, TDRC, TCON, TRCK, TPOS, USLT, TSRC
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
 
@@ -31,8 +31,12 @@ class TagData:
         self.album: Optional[str] = None
         self.track_number: Optional[int] = None
         self.total_tracks: Optional[int] = None
+        self.disc_number: Optional[int] = None
+        self.total_discs: Optional[int] = None
         self.genre: Optional[str] = None
         self.year: Optional[str] = None
+        self.lyrics: Optional[str] = None
+        self.isrc: Optional[str] = None
         self.cover_art: Optional[bytes] = None
         self.cover_mime: Optional[str] = None
 
@@ -70,9 +74,12 @@ def extract_tags_mp3(filepath: Path) -> TagData:
 
         # Year
         if 'TDRC' in audio:
-            tags.year = str(audio['TDRC'].text[0])
+            year_str = str(audio['TDRC'].text[0])
+            # Extract year from full date (e.g., "2023-10-12" -> "2023")
+            tags.year = year_str.split('-')[0] if '-' in year_str else year_str
         elif 'TYER' in audio:
-            tags.year = str(audio['TYER'].text[0])
+            year_str = str(audio['TYER'].text[0])
+            tags.year = year_str.split('-')[0] if '-' in year_str else year_str
 
         # Track number
         if 'TRCK' in audio:
@@ -84,7 +91,27 @@ def extract_tags_mp3(filepath: Path) -> TagData:
             else:
                 tags.track_number = int(track_str)
 
-        # Cover art (front cover only)
+        # Disc number
+        if 'TPOS' in audio:
+            disc_str = str(audio['TPOS'].text[0])
+            if '/' in disc_str:
+                parts = disc_str.split('/')
+                tags.disc_number = int(parts[0])
+                tags.total_discs = int(parts[1])
+            else:
+                tags.disc_number = int(disc_str)
+
+        # Lyrics
+        for key in audio.keys():
+            if key.startswith('USLT'):
+                tags.lyrics = str(audio[key].text)
+                break
+
+        # ISRC
+        if 'TSRC' in audio:
+            tags.isrc = str(audio['TSRC'].text[0])
+
+        # Cover art - prioritize front cover, but accept any if front not found
         for key in audio.keys():
             if key.startswith('APIC'):
                 apic = audio[key]
@@ -136,9 +163,12 @@ def extract_tags_flac(filepath: Path) -> TagData:
 
         # Year
         if 'date' in audio:
-            tags.year = audio['date'][0]
+            year_str = audio['date'][0]
+            # Extract year from full date (e.g., "2023-10-12" -> "2023")
+            tags.year = year_str.split('-')[0] if '-' in year_str else year_str
         elif 'year' in audio:
-            tags.year = audio['year'][0]
+            year_str = audio['year'][0]
+            tags.year = year_str.split('-')[0] if '-' in year_str else year_str
 
         # Track number
         if 'tracknumber' in audio:
@@ -154,6 +184,31 @@ def extract_tags_flac(filepath: Path) -> TagData:
             tags.total_tracks = int(audio['totaltracks'][0])
         elif 'tracktotal' in audio and not tags.total_tracks:
             tags.total_tracks = int(audio['tracktotal'][0])
+
+        # Disc number
+        if 'discnumber' in audio:
+            disc_str = audio['discnumber'][0]
+            if '/' in disc_str:
+                parts = disc_str.split('/')
+                tags.disc_number = int(parts[0])
+                tags.total_discs = int(parts[1])
+            else:
+                tags.disc_number = int(disc_str)
+
+        if 'totaldiscs' in audio and not tags.total_discs:
+            tags.total_discs = int(audio['totaldiscs'][0])
+        elif 'disctotal' in audio and not tags.total_discs:
+            tags.total_discs = int(audio['disctotal'][0])
+
+        # Lyrics
+        if 'lyrics' in audio:
+            tags.lyrics = audio['lyrics'][0]
+        elif 'unsyncedlyrics' in audio:
+            tags.lyrics = audio['unsyncedlyrics'][0]
+
+        # ISRC
+        if 'isrc' in audio:
+            tags.isrc = audio['isrc'][0]
 
         # Cover art (front cover)
         if audio.pictures:
@@ -202,7 +257,9 @@ def extract_tags_m4a(filepath: Path) -> TagData:
 
         # Year
         if '\xa9day' in audio:
-            tags.year = audio['\xa9day'][0]
+            year_str = audio['\xa9day'][0]
+            # Extract year from full date (e.g., "2023-10-12" -> "2023")
+            tags.year = year_str.split('-')[0] if '-' in year_str else year_str
 
         # Track number
         if 'trkn' in audio:
@@ -210,6 +267,21 @@ def extract_tags_m4a(filepath: Path) -> TagData:
             tags.track_number = track_info[0]
             if len(track_info) > 1:
                 tags.total_tracks = track_info[1]
+
+        # Disc number
+        if 'disk' in audio:
+            disc_info = audio['disk'][0]
+            tags.disc_number = disc_info[0]
+            if len(disc_info) > 1:
+                tags.total_discs = disc_info[1]
+
+        # Lyrics
+        if '\xa9lyr' in audio:
+            tags.lyrics = audio['\xa9lyr'][0]
+
+        # ISRC
+        if '----:com.apple.iTunes:ISRC' in audio:
+            tags.isrc = audio['----:com.apple.iTunes:ISRC'][0].decode('utf-8')
 
         # Cover art
         if 'covr' in audio:
@@ -261,12 +333,24 @@ def apply_tags_mp3(filepath: Path, tags: TagData):
                 track_str += f"/{tags.total_tracks}"
             audio.add(TRCK(encoding=3, text=track_str))
 
+        if tags.disc_number:
+            disc_str = str(tags.disc_number)
+            if tags.total_discs:
+                disc_str += f"/{tags.total_discs}"
+            audio.add(TPOS(encoding=3, text=disc_str))
+
+        if tags.lyrics:
+            audio.add(USLT(encoding=3, lang='eng', desc='', text=tags.lyrics))
+
+        if tags.isrc:
+            audio.add(TSRC(encoding=3, text=tags.isrc))
+
         if tags.cover_art:
             audio.add(APIC(
                 encoding=3,
                 mime=tags.cover_mime or 'image/jpeg',
-                type=3,  # Front cover
-                desc='Front Cover',
+                type=3,  # Cover (front)
+                desc='',
                 data=tags.cover_art
             ))
 
@@ -312,11 +396,26 @@ def apply_tags_flac(filepath: Path, tags: TagData):
         if tags.total_tracks:
             audio['totaltracks'] = str(tags.total_tracks)
 
+        if tags.disc_number:
+            disc_str = str(tags.disc_number)
+            if tags.total_discs:
+                disc_str += f"/{tags.total_discs}"
+            audio['discnumber'] = disc_str
+
+        if tags.total_discs:
+            audio['totaldiscs'] = str(tags.total_discs)
+
+        if tags.lyrics:
+            audio['lyrics'] = tags.lyrics
+
+        if tags.isrc:
+            audio['isrc'] = tags.isrc
+
         if tags.cover_art:
             picture = Picture()
-            picture.type = 3  # Front cover
+            picture.type = 3  # Cover (front)
             picture.mime = tags.cover_mime or 'image/jpeg'
-            picture.desc = 'Front Cover'
+            picture.desc = ''
             picture.data = tags.cover_art
             audio.add_picture(picture)
 
@@ -358,6 +457,18 @@ def apply_tags_m4a(filepath: Path, tags: TagData):
             else:
                 audio['trkn'] = [(tags.track_number, 0)]
 
+        if tags.disc_number:
+            if tags.total_discs:
+                audio['disk'] = [(tags.disc_number, tags.total_discs)]
+            else:
+                audio['disk'] = [(tags.disc_number, 0)]
+
+        if tags.lyrics:
+            audio['\xa9lyr'] = tags.lyrics
+
+        if tags.isrc:
+            audio['----:com.apple.iTunes:ISRC'] = tags.isrc.encode('utf-8')
+
         if tags.cover_art:
             # Determine format
             if tags.cover_mime == 'image/png':
@@ -366,6 +477,8 @@ def apply_tags_m4a(filepath: Path, tags: TagData):
                 imageformat = MP4Cover.FORMAT_JPEG
 
             audio['covr'] = [MP4Cover(tags.cover_art, imageformat=imageformat)]
+            # Set artwork descriptor to indicate Cover (front) - type 3
+            audio['----:com.apple.iTunes:ArtworkDescriptor'] = b'0,3,'
 
         audio.save()
 
@@ -373,7 +486,7 @@ def apply_tags_m4a(filepath: Path, tags: TagData):
         print(f"Error applying M4A tags to {filepath}: {e}")
 
 
-def process_file(filepath: Path) -> bool:
+def process_file(filepath: Path, total_tracks_per_disc: Dict[int, int], total_discs: int) -> bool:
     """Process a single music file."""
     ext = filepath.suffix.lower()
 
@@ -385,16 +498,50 @@ def process_file(filepath: Path) -> bool:
     # Extract tags based on file type
     if ext == '.mp3':
         tags = extract_tags_mp3(filepath)
-        apply_tags_mp3(filepath, tags)
     elif ext == '.flac':
         tags = extract_tags_flac(filepath)
-        apply_tags_flac(filepath, tags)
     elif ext in {'.m4a', '.mp4', '.m4b', '.m4p'}:
         tags = extract_tags_m4a(filepath)
-        apply_tags_m4a(filepath, tags)
     else:
         print(f"  Skipping unsupported format: {ext}")
         return False
+
+    # Set total_tracks based on actual count in directory for this disc
+    disc_num = tags.disc_number if tags.disc_number else 1
+    if disc_num in total_tracks_per_disc:
+        tags.total_tracks = total_tracks_per_disc[disc_num]
+
+    # Remove disc info if there's only one disc
+    if total_discs == 1:
+        tags.disc_number = None
+        tags.total_discs = None
+
+    # Apply tags based on file type
+    if ext == '.mp3':
+        apply_tags_mp3(filepath, tags)
+    elif ext == '.flac':
+        apply_tags_flac(filepath, tags)
+    elif ext in {'.m4a', '.mp4', '.m4b', '.m4p'}:
+        apply_tags_m4a(filepath, tags)
+
+    # Rename file based on track info
+    if tags.track_number and tags.title:
+        # Sanitize title for filename (remove invalid characters)
+        safe_title = tags.title.replace('/', '-').replace('\\', '-').replace(':', '-')
+        safe_title = safe_title.replace('?', '').replace('*', '').replace('"', '').replace('<', '').replace('>', '').replace('|', '')
+
+        if total_discs > 1 and tags.disc_number:
+            # Multi-disc: CD<disc> - <track> - <title>.ext
+            new_filename = f"CD{tags.disc_number} - {tags.track_number:02d} - {safe_title}{ext}"
+        else:
+            # Single disc: <track> - <title>.ext
+            new_filename = f"{tags.track_number:02d} - {safe_title}{ext}"
+
+        new_filepath = filepath.parent / new_filename
+
+        if new_filepath != filepath:
+            filepath.rename(new_filepath)
+            print(f"  ✓ Renamed to: {new_filename}")
 
     print(f"  ✓ Cleaned tags: {tags}")
     return True
@@ -423,9 +570,35 @@ def process_directory(directory: str):
 
     print(f"Found {len(music_files)} music file(s)\n")
 
+    # First pass: count tracks per disc and determine total discs
+    tracks_per_disc: Dict[int, int] = {}
+    all_discs = set()
+
+    for filepath in music_files:
+        ext = filepath.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            continue
+
+        # Extract tags to get disc number
+        if ext == '.mp3':
+            tags = extract_tags_mp3(filepath)
+        elif ext == '.flac':
+            tags = extract_tags_flac(filepath)
+        elif ext in {'.m4a', '.mp4', '.m4b', '.m4p'}:
+            tags = extract_tags_m4a(filepath)
+        else:
+            continue
+
+        disc_num = tags.disc_number if tags.disc_number else 1
+        all_discs.add(disc_num)
+        tracks_per_disc[disc_num] = tracks_per_disc.get(disc_num, 0) + 1
+
+    total_discs = len(all_discs)
+
+    # Second pass: process files with correct track counts
     processed = 0
     for filepath in sorted(music_files):
-        if process_file(filepath):
+        if process_file(filepath, tracks_per_disc, total_discs):
             processed += 1
         print()
 
