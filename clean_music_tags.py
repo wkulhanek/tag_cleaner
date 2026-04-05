@@ -10,11 +10,13 @@ Cover Art (front), Publishing Year, and Total Tracks.
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import mutagen
 from mutagen.id3 import ID3, APIC, TPE1, TPE2, TIT2, TALB, TDRC, TCON, TRCK, TPOS, USLT, TSRC
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
+from mutagen.mp3 import MP3
+from mutagen.oggvorbis import OggVorbis
 
 
 # Supported file extensions
@@ -547,6 +549,33 @@ def process_file(filepath: Path, total_tracks_per_disc: Dict[int, int], total_di
     return True
 
 
+def get_bitrate(filepath: Path) -> Optional[int]:
+    """Get the bitrate of a music file in kbps."""
+    try:
+        ext = filepath.suffix.lower()
+        
+        if ext == '.mp3':
+            audio = MP3(filepath)
+            return audio.info.bitrate // 1000  # Convert to kbps
+        elif ext == '.flac':
+            audio = FLAC(filepath)
+            return audio.info.bitrate // 1000  # Convert to kbps
+        elif ext in {'.m4a', '.mp4', '.m4b', '.m4p'}:
+            audio = MP4(filepath)
+            return audio.info.bitrate // 1000  # Convert to kbps
+        elif ext == '.ogg':
+            audio = OggVorbis(filepath)
+            return audio.info.bitrate // 1000  # Convert to kbps
+        elif ext == '.opus':
+            audio = mutagen.opus.Opus(filepath)
+            return audio.info.bitrate // 1000  # Convert to kbps
+        else:
+            return None
+    except Exception as e:
+        print(f"Error getting bitrate for {filepath}: {e}")
+        return None
+
+
 def process_directory(directory: str):
     """Process all music files in a directory."""
     dir_path = Path(directory)
@@ -595,10 +624,102 @@ def process_directory(directory: str):
 
     total_discs = len(all_discs)
 
+    # Make a copy of original file paths for conflict detection
+    original_files = list(music_files)
+    
+    # Group files by track number to detect conflicts
+    files_by_track: Dict[Tuple[int, int], List[Path]] = {}  # (disc_number, track_number) -> [filepaths]
+    
+    for filepath in original_files:
+        ext = filepath.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            continue
+
+        # Extract tags to get track and disc info
+        if ext == '.mp3':
+            tags = extract_tags_mp3(filepath)
+        elif ext == '.flac':
+            tags = extract_tags_flac(filepath)
+        elif ext in {'.m4a', '.mp4', '.m4b', '.m4p'}:
+            tags = extract_tags_m4a(filepath)
+        else:
+            continue
+
+        disc_num = tags.disc_number if tags.disc_number else 1
+        track_num = tags.track_number if tags.track_number else 0
+        key = (disc_num, track_num)
+        
+        if key not in files_by_track:
+            files_by_track[key] = []
+        files_by_track[key].append(filepath)
+
+    # Resolve conflicts: keep file with highest bitrate
+    files_to_process = []
+    
+    for key, file_list in files_by_track.items():
+        if len(file_list) == 1:
+            # No conflict
+            files_to_process.append(file_list[0])
+        else:
+            # Conflict: multiple files with same track number
+            print(f"Conflict detected: {len(file_list)} files with track {key[1]} on disc {key[0]}")
+            
+            # Get bitrates and find file with highest bitrate
+            bitrates = []
+            for filepath in file_list:
+                bitrate = get_bitrate(filepath)
+                if bitrate is not None:
+                    bitrates.append((bitrate, filepath))
+                else:
+                    bitrates.append((0, filepath))  # Treat unknown bitrate as 0
+            
+            # Sort by bitrate (descending) and keep the highest
+            bitrates.sort(reverse=True, key=lambda x: x[0])
+            best_file = bitrates[0][1]
+            files_to_process.append(best_file)
+            
+            # Delete lower bitrate files immediately
+            for bitrate, filepath in bitrates[1:]:
+                try:
+                    if filepath.exists():
+                        filepath.unlink()
+                        print(f"  Keeping: {best_file.name} ({bitrates[0][0]} kbps)")
+                        print(f"  Deleted: {filepath.name} ({bitrate} kbps)")
+                except Exception as e:
+                    print(f"  Error deleting {filepath.name}: {e}")
+
+    # Recalculate track counts after conflict resolution
+    tracks_per_disc = {}
+    all_discs = set()
+    
+    for filepath in files_to_process:
+        if not filepath.exists():
+            continue
+            
+        ext = filepath.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            continue
+
+        # Extract tags to get disc number from remaining files
+        if ext == '.mp3':
+            tags = extract_tags_mp3(filepath)
+        elif ext == '.flac':
+            tags = extract_tags_flac(filepath)
+        elif ext in {'.m4a', '.mp4', '.m4b', '.m4p'}:
+            tags = extract_tags_m4a(filepath)
+        else:
+            continue
+
+        disc_num = tags.disc_number if tags.disc_number else 1
+        all_discs.add(disc_num)
+        tracks_per_disc[disc_num] = tracks_per_disc.get(disc_num, 0) + 1
+
+    total_discs = len(all_discs)
+
     # Second pass: process files with correct track counts
     processed = 0
-    for filepath in sorted(music_files):
-        if process_file(filepath, tracks_per_disc, total_discs):
+    for filepath in files_to_process:
+        if filepath.exists() and process_file(filepath, tracks_per_disc, total_discs):
             processed += 1
         print()
 
